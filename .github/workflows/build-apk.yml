@@ -23,6 +23,17 @@ jobs:
           mkdir hat-build
           unzip -q HAT_Project.zip -d hat-build
 
+      - name: Fix Material 3 opt-in
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("hat-build/app/src/main/java/com/hat/control/ui/HatRealControlApp.kt")
+          s = p.read_text()
+          line = "@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)\n"
+          if not s.startswith(line):
+              p.write_text(line + s)
+          PY
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
@@ -35,6 +46,28 @@ jobs:
       - name: Install Android platform
         run: |
           yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build H.A.T. APK
+        working-directory: hat-build
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Collect APK
+        run: |
+          APK=$(find hat-build/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          test -n "$APK"
+          cp "$APK" HAT-Control.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HAT-Control-APK
+          path: HAT-Control.apk          yes | sdkmanager --licenses >/dev/null || true
           sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Set up Gradle
