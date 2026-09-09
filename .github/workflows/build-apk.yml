@@ -34,7 +34,157 @@ jobs:
               p.write_text(line + s)
           PY
 
+      - name: Patch safe Google Home light commands
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("hat-build/app/src/main/java/com/hat/control/integration/GoogleHomeBridgeImpl.kt")
+          s = p.read_text()
+
+          new_power = '''    override suspend fun setPower(deviceId: String, on: Boolean) {
+              val trait = handles[deviceId]?.onOff
+              if (trait == null) {
+                  _status.value = "Power control unavailable for this light"
+                  return
+              }
+              try {
+                  if (on) trait.on() else trait.off()
+                  mutate(deviceId) { it.copy(isOn = on) }
+                  _status.value = "Power ${if (on) "ON" else "OFF"} command sent"
+              } catch (e: Exception) {
+                  _status.value = "Power command failed: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+              }
+          }
+
+          '''
+
+          new_brightness = '''    override suspend fun setBrightness(deviceId: String, percent: Int) {
+              val handle = handles[deviceId]
+              if (handle == null) {
+                  _status.value = "Light is not available. Tap Refresh devices."
+                  return
+              }
+              val pct = percent.coerceIn(0, 100)
+              try {
+                  if (pct == 0) {
+                      handle.onOff?.off()
+                      mutate(deviceId) { it.copy(brightness = 0, isOn = false) }
+                      _status.value = "Brightness set to 0%"
+                      return
+                  }
+                  val level = handle.level
+                  if (level == null) {
+                      _status.value = "Brightness control unavailable for this light"
+                      return
+                  }
+                  level.moveToLevel(
+                      level = ((pct * 254) / 100).coerceIn(1, 254).toUByte(),
+                      transitionTime = null,
+                      optionsMask = LevelControlTrait.OptionsBitmap(),
+                      optionsOverride = LevelControlTrait.OptionsBitmap(),
+                  )
+                  handle.onOff?.on()
+                  mutate(deviceId) { it.copy(brightness = pct, isOn = true) }
+                  _status.value = "Brightness ${pct}% command sent"
+              } catch (e: Exception) {
+                  _status.value = "Brightness command failed: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+              }
+          }
+
+          '''
+
+          new_color = '''    override suspend fun setColor(deviceId: String, hueDegrees: Float, saturation: Float) {
+              val handle = handles[deviceId]
+              if (handle == null) {
+                  _status.value = "Light is not available. Tap Refresh devices."
+                  return
+              }
+              val color = handle.color
+              if (color == null) {
+                  _status.value = "Color control unavailable for this light"
+                  return
+              }
+              val normalizedHue = ((hueDegrees % 360f) + 360f) % 360f
+              val normalizedSaturation = saturation.coerceIn(0f, 1f)
+              try {
+                  color.moveToHueAndSaturation(
+                      hue = ((normalizedHue / 360f) * 254f).toInt().coerceIn(0, 254).toUByte(),
+                      saturation = (normalizedSaturation * 254f).toInt().coerceIn(0, 254).toUByte(),
+                      transitionTime = 4u.toUShort(),
+                      optionsMask = ColorControlTrait.OptionsBitmap(),
+                      optionsOverride = ColorControlTrait.OptionsBitmap(),
+                  )
+                  handle.onOff?.on()
+                  mutate(deviceId) {
+                      it.copy(hue = normalizedHue, saturation = normalizedSaturation, isOn = true)
+                  }
+                  _status.value = "Color command sent"
+              } catch (e: Exception) {
+                  _status.value = "Color command failed: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
+              }
+          }
+
+          '''
+
+          patterns = [
+              (r'    override suspend fun setPower\(deviceId: String, on: Boolean\) \{.*?\n    \}\n\n(?=    override suspend fun setBrightness)', new_power, 'setPower'),
+              (r'    override suspend fun setBrightness\(deviceId: String, percent: Int\) \{.*?\n    \}\n\n(?=    override suspend fun setColor)', new_brightness, 'setBrightness'),
+              (r'    override suspend fun setColor\(deviceId: String, hueDegrees: Float, saturation: Float\) \{.*?\n    \}\n\n(?=    private fun mutate)', new_color, 'setColor'),
+          ]
+
+          for pattern, replacement, label in patterns:
+              s, n = re.subn(pattern, replacement, s, count=1, flags=re.S)
+              if n != 1:
+                  raise SystemExit(f"Could not patch {label}; matches={n}")
+
+          p.write_text(s)
+
+          c = Path("hat-build/app/src/main/java/com/hat/control/HatController.kt")
+          cs = c.read_text()
+          cs = cs.replace(
+              'private val _message = MutableStateFlow("Connect Google Home to begin")',
+              'private val _message = MutableStateFlow("Tap Refresh devices to update your lights")',
+              1,
+          )
+          c.write_text(cs)
+          PY
+
       - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android platform
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build H.A.T. APK
+        working-directory: hat-build
+        run: gradle :app:assembleDebug --stacktrace
+
+      - name: Collect APK
+        run: |
+          APK=$(find hat-build/app/build/outputs/apk/debug -name "*.apk" | head -n 1)
+          test -n "$APK"
+          cp "$APK" HAT-Control.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: HAT-Control-APK
+          path: HAT-Control.apk      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
